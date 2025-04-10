@@ -187,6 +187,7 @@ class VietnameseToneNormalizer:
         return re.sub(char1252, lambda x: char_map[x.group()], text.strip())
     
     @staticmethod
+    # https://github.com/VinAIResearch/BARTpho/blob/main/VietnameseToneNormalization.md
     def normalize_sentence_typing(text, vinai_normalization=False):
         """
         Chuẩn hóa cách gõ dấu trong câu tiếng Việt
@@ -196,7 +197,6 @@ class VietnameseToneNormalizer:
         Returns:
             str: Văn bản đã được chuẩn hóa cách gõ dấu
         """
-        # https://github.com/VinAIResearch/BARTpho/blob/main/VietnameseToneNormalization.md
         if vinai_normalization:
             for wrong, correct in VietnameseToneNormalizer.VINAI_NORMALIZED_TONE.items():
                 text = text.replace(wrong, correct)
