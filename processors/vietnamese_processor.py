@@ -9,6 +9,10 @@ from io import StringIO
 from vncorenlp import VnCoreNLP
 from transformers import pipeline
 
+import pandas as pd
+import glob
+from pathlib import Path
+
 
 # https://ihateregex.io
 class VietnameseTextCleaner:
@@ -457,7 +461,48 @@ class VietnameseTextPreprocessor:
             self.word_segmenter.close()
     
 
+def process_csv_files(preprocessor, input_dir='datasets', output_dir='processed_datasets'):
+    """
+    Xử lý tất cả các file CSV trong thư mục input_dir và lưu kết quả vào output_dir
+    Args:
+        preprocessor (VietnameseTextPreprocessor): Bộ tiền xử lý văn bản
+        input_dir (str): Thư mục chứa các file CSV đầu vào
+        output_dir (str): Thư mục để lưu các file CSV đã xử lý
+    """    
+    # Tạo thư mục output nếu chưa tồn tại
+    os.makedirs(output_dir, exist_ok=True)
+    
+    # Tìm tất cả các file CSV trong thư mục input_dir
+    csv_files = glob.glob(f'{input_dir}/**/*.csv', recursive=True)
+    
+    for csv_file in csv_files:
+        print(f"\nĐang xử lý file: {csv_file}")
+        
+        # Đọc file CSV
+        df = pd.read_csv(csv_file)
+        
+        # Kiểm tra xem có cột Review không
+        if 'Review' not in df.columns:
+            print(f"File {csv_file} không có cột 'Review', bỏ qua...")
+            continue
+            
+        # Tiền xử lý cột Review
+        print("Đang tiền xử lý các Review...")
+        df['processed_review'] = preprocessor.process_batch(df['Review'].tolist(), correct_errors=True)
+        
+        # Tạo đường dẫn file output
+        rel_path = Path(csv_file).relative_to(input_dir)
+        output_file = os.path.join(output_dir, str(rel_path))
+        
+        # Tạo thư mục con nếu cần
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+        
+        # Lưu kết quả
+        df.to_csv(output_file, index=False)
+        print(f"Đã lưu kết quả vào: {output_file}")
+
 if __name__ == '__main__':
+    # Khởi tạo bộ tiền xử lý
     extra_teencodes = { 
         'khách sạn': ['ks'], 'nhà hàng': ['nhahang'], 'nhân viên': ['nv'],
         'cửa hàng': ['store', 'sop', 'shopE', 'shop'], 
@@ -470,17 +515,9 @@ if __name__ == '__main__':
     }
     
     preprocessor = VietnameseTextPreprocessor(vncorenlp_dir='./VnCoreNLP', extra_teencodes=extra_teencodes, max_correction_length=512)
-    sample_texts = [
-        'Ga giường không sạch, nhân viên quên dọn phòng một ngày. Chất lựơng "ko" đc thỏai mái 😔',
-        'Cám ơn Chudu24 rất nhiềuGia đình tôi có 1 kỳ nghỉ vui vẻ.Resort Bình Minh nằm ở vị trí rất đẹp, theo đúng tiêu chuẩn, còn về ăn sáng thì wa dở, chỉ có 2,3 món để chọn',
-        'Giá cả hợp líĂn uống thoả thíchGiữ xe miễn phíKhông gian bờ kè thoáng mát Có phòng máy lạnhMỗi tội lúc quán đông thì đợi hơi lâu',
-        'May lần trước ăn mì k hà, hôm nay ăn thử bún bắp bò. Có chả tôm viên ăn lạ lạ. Tôm thì k nhiều, nhưng vẫn có tôm thật ở nhân bên trong. ',
-        'Ngồi ăn Cơm nhà *tiền thân là quán Bão* Phần vậy là 59k nha. Trưa từ 10h-14h, chiều từ 16h-19h. À,có sữa hạt sen ngon lắmm. #food #foodpic #foodporn #foodholic #yummy #deliciuous',
-        'This is an English comment with a URL https://example.com',
-        'Just another English comment without URL'
-    ]
     
-    preprocessed_texts = preprocessor.process_batch(sample_texts, correct_errors=True)
+    # Xử lý các file CSV
+    process_csv_files(preprocessor, input_dir='datasets', output_dir='processed_datasets')
+    
+    # Đóng VnCoreNLP
     preprocessor.close_vncorenlp()
-    print("\nPreprocessed texts:")
-    print(preprocessed_texts)
