@@ -6,6 +6,7 @@ from typing import List, Dict, Tuple, Optional
 from sklearn_crfsuite import CRF
 import numpy as np
 from sklearn.model_selection import train_test_split
+import os
 
 class AspectExtractor:
     """
@@ -29,16 +30,47 @@ class AspectExtractor:
         
         # Trích xuất features cho tập train
         train_features = []
-        for text in X_train:
+        train_labels = []
+        
+        for text, text_labels in zip(X_train, y_train):
+            # Tokenize văn bản
+            tokens = self.tokenizer.tokenize(text)
+            if len(tokens) > 512:  # Giới hạn độ dài sequence
+                tokens = tokens[:512]
+            
+            # Lấy embeddings cho mỗi token
             inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
             with torch.no_grad():
                 outputs = self.model(**inputs)
             embeddings = outputs.last_hidden_state
-            features = self._get_features(embeddings)
-            train_features.append(features)
+            
+            # Tạo features cho mỗi token
+            token_features = []
+            for i, token in enumerate(tokens):
+                # Chuyển đổi embedding thành các features scalar
+                token_embedding = embeddings[0, i].numpy()
+                # Lấy một số giá trị từ embedding để làm features
+                features = {
+                    'token': token,
+                    'embedding_mean': float(token_embedding.mean()),
+                    'embedding_std': float(token_embedding.std()),
+                    'embedding_max': float(token_embedding.max()),
+                    'embedding_min': float(token_embedding.min()),
+                    'is_first': i == 0,
+                    'is_last': i == len(tokens) - 1,
+                    'length': len(token),
+                    'has_underscore': '_' in token,
+                    'is_digit': token.replace('▁', '').isdigit(),
+                    'is_upper': token.replace('▁', '').isupper()
+                }
+                token_features.append(features)
+            
+            train_features.append(token_features)
+            # Cắt labels cho khớp với số lượng tokens
+            train_labels.append(text_labels[:len(tokens)])
         
         # Huấn luyện CRF
-        self.crf.fit(train_features, y_train)
+        self.crf.fit(train_features, train_labels)
         self.is_trained = True
         
     def extract_terms(self, text: str) -> List[str]:
@@ -52,22 +84,43 @@ class AspectExtractor:
         if not self.is_trained:
             raise ValueError("CRF chưa được huấn luyện. Vui lòng gọi phương thức train() trước.")
             
-        # Tokenize và encode văn bản
+        # Tokenize văn bản
+        tokens = self.tokenizer.tokenize(text)
+        if len(tokens) > 512:  # Giới hạn độ dài sequence
+            tokens = tokens[:512]
+        
+        # Lấy embeddings cho mỗi token
         inputs = self.tokenizer(text, return_tensors="pt", padding=True, truncation=True, max_length=512)
         with torch.no_grad():
             outputs = self.model(**inputs)
-        
-        # Lấy embeddings từ lớp cuối cùng
         embeddings = outputs.last_hidden_state
         
-        # Sử dụng CRF để dự đoán nhãn cho mỗi token
-        features = self._get_features(embeddings)
-        labels = self.crf.predict([features])[0]
+        # Tạo features cho mỗi token
+        token_features = []
+        for i, token in enumerate(tokens):
+            token_embedding = embeddings[0, i].numpy()
+            features = {
+                'token': token,
+                'embedding_mean': float(token_embedding.mean()),
+                'embedding_std': float(token_embedding.std()),
+                'embedding_max': float(token_embedding.max()),
+                'embedding_min': float(token_embedding.min()),
+                'is_first': i == 0,
+                'is_last': i == len(tokens) - 1,
+                'length': len(token),
+                'has_underscore': '_' in token,
+                'is_digit': token.replace('▁', '').isdigit(),
+                'is_upper': token.replace('▁', '').isupper()
+            }
+            token_features.append(features)
+        
+        # Sử dụng CRF để dự đoán nhãn
+        labels = self.crf.predict([token_features])[0]
         
         # Trích xuất các term dựa trên nhãn
         terms = []
         current_term = []
-        for token, label in zip(self.tokenizer.tokenize(text), labels):
+        for token, label in zip(tokens, labels):
             if label == 'B-TERM':
                 if current_term:
                     terms.append(''.join(current_term))
@@ -82,17 +135,6 @@ class AspectExtractor:
             terms.append(''.join(current_term))
             
         return terms
-    
-    def _get_features(self, embeddings: torch.Tensor) -> np.ndarray:
-        """
-        Trích xuất features từ embeddings cho CRF
-        Args:
-            embeddings (torch.Tensor): Embeddings từ PhoBERT
-        Returns:
-            np.ndarray: Features cho CRF
-        """
-        # Lấy features từ embeddings (có thể thêm các features khác)
-        return embeddings.mean(dim=1).numpy()
 
 class KnowledgeGraph:
     """
@@ -113,6 +155,8 @@ class KnowledgeGraph:
             if '#' in aspect:
                 parent, child = aspect.split('#')
                 self.aspect_hierarchy[aspect] = parent
+                # Thêm cạnh từ aspect con đến aspect cha với quan hệ "thuộc về"
+                # Ví dụ: FACILITIES#EQUIPMENT -> FACILITIES (EQUIPMENT thuộc về FACILITIES)
                 self.G.add_edge(child, parent, relation="belongs-to")
     
     def get_parent_aspect(self, aspect_category: str) -> Optional[str]:
@@ -157,6 +201,9 @@ def process_with_kg(csv_file: str, output_file: str):
         csv_file (str): Đường dẫn đến file CSV đầu vào
         output_file (str): Đường dẫn đến file CSV đầu ra
     """
+    # Tạo thư mục đầu ra nếu chưa tồn tại
+    os.makedirs(os.path.dirname(output_file), exist_ok=True)
+    
     # Khởi tạo bộ trích xuất term
     extractor = AspectExtractor()
     
@@ -175,11 +222,18 @@ def process_with_kg(csv_file: str, output_file: str):
     for _, row in df.iterrows():
         review = row['Review']
         texts.append(review)
-        # Tạo nhãn cho mỗi token (O: không phải term, B-TERM: bắt đầu term, I-TERM: tiếp tục term)
-        review_labels = ['O'] * len(review.split())
-        for i, word in enumerate(review.split()):
+        
+        # Tokenize review
+        tokens = extractor.tokenizer.tokenize(review)
+        if len(tokens) > 512:
+            tokens = tokens[:512]
+        
+        # Tạo nhãn cho mỗi token
+        review_labels = ['O'] * len(tokens)
+        for i, token in enumerate(tokens):
+            token_text = token.replace('▁', '')
             for aspect in aspect_columns:
-                if word.lower() in aspect.lower():
+                if token_text.lower() in aspect.lower():
                     review_labels[i] = 'B-TERM' if i == 0 or review_labels[i-1] == 'O' else 'I-TERM'
         labels.append(review_labels)
     
@@ -238,4 +292,10 @@ if __name__ == '__main__':
     # Ví dụ sử dụng
     input_file = 'datasets/mmlab_uit_hotel/2-mmlab-uit-hotel-dev.csv'
     output_file = 'datasets_kg/mmlab_uit_hotel/2-mmlab-uit-hotel-dev.csv'
-    process_with_kg(input_file, output_file) 
+    process_with_kg(input_file, output_file)
+
+    # 1. Huấn luyện CRF với dữ liệu từ CSV
+    # 2. Trích xuất các term từ review sử dụng PhoBERT + CRF đã huấn luyện
+    # 3. Tìm các aspect tương ứng với các term
+    # 4. Sử dụng Knowledge Graph để suy luận các aspect liên quan
+    # 5. Dự đoán sentiment cho các aspect mới
